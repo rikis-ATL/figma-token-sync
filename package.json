@@ -1,0 +1,11 @@
+{
+  "name": "figma-token-sync-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "install": "cd plugin && npm install",
+    "build": "cd plugin && npm run build",
+    "dev": "cd plugin && npm run dev",
+    "typecheck": "cd plugin && npm run typecheck"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["ES2017"],
+    "jsx": "preserve",
+    "types": ["@figma/plugin-typings"]
+  },
+  "include": ["src/plugin/**/*"]
+}

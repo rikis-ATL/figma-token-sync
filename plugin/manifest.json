@@ -1,0 +1,14 @@
+{
+  "name": "Figma Token Sync",
+  "id": "figma-token-sync",
+  "api": "1.0.0",
+  "main": "dist/plugin.js",
+  "ui": "dist/src/ui/index.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": [
+      "https://api.github.com"
+    ]
+  }
+}
