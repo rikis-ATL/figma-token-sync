@@ -98,10 +98,10 @@ function getCollectionKey(collectionName: string): string {
  * Transform all Figma variables to Style Dictionary tokens
  * Groups tokens by collection into separate objects
  */
-export function transformFigmaToTokens(options: {
+export async function transformFigmaToTokens(options: {
   collectionsToInclude?: string[]; // Filter to specific collections
   organizeByCollection?: boolean; // Create separate token objects per collection
-} = {}): TransformToSDResult {
+} = {}): Promise<TransformToSDResult> {
   const result: TransformToSDResult = {
     success: true,
     tokens: {},
@@ -112,7 +112,7 @@ export function transformFigmaToTokens(options: {
   };
 
   try {
-    const collections = getAllVariableCollections();
+    const collections = await getAllVariableCollections();
 
     if (collections.length === 0) {
       result.warnings.push('No variable collections found in this file');
@@ -129,7 +129,7 @@ export function transformFigmaToTokens(options: {
       }
 
       try {
-        const collection = figma.variables.getVariableCollectionById(
+        const collection = await figma.variables.getVariableCollectionByIdAsync(
           collectionInfo.id
         );
         if (!collection) {
@@ -137,7 +137,7 @@ export function transformFigmaToTokens(options: {
           continue;
         }
 
-        const variables = getVariablesInCollection(collection);
+        const variables = await getVariablesInCollection(collection);
 
         if (variables.length === 0) {
           result.warnings.push(

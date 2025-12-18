@@ -36,6 +36,13 @@ export class GitHubClient {
   }
 
   /**
+   * Get configuration details
+   */
+  getConfig(): GitHubConfig {
+    return this.config;
+  }
+
+  /**
    * Make an authenticated request to GitHub API
    */
   async request<T>(
@@ -59,7 +66,7 @@ export class GitHubClient {
 
       // Handle rate limiting
       if (response.status === 429) {
-        const resetTime = response.headers.get('X-RateLimit-Reset');
+        const resetTime = response.headers?.get('X-RateLimit-Reset');
         throw new GitHubAPIError(
           `Rate limit exceeded. Resets at ${resetTime ? new Date(parseInt(resetTime) * 1000).toLocaleString() : 'unknown'}`,
           429
@@ -67,13 +74,19 @@ export class GitHubClient {
       }
 
       // Parse response body
-      const contentType = response.headers.get('content-type');
+      const contentType = response.headers?.get('content-type');
       let data: any;
 
       if (contentType?.includes('application/json')) {
         data = await response.json();
       } else {
-        data = await response.text();
+        // Try to parse as JSON even if content-type is wrong
+        const text = await response.text();
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
+        }
       }
 
       // Handle errors

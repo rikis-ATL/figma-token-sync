@@ -5,6 +5,7 @@
 import {
   getOrCreateCollection,
   setVariable,
+  setVariableForMode,
   parseColor,
   parseDimension,
 } from '../figma-api/variables';
@@ -148,18 +149,25 @@ function getFigmaVariableType(
  * Convert Style Dictionary token value to Figma variable value
  */
 function convertTokenValue(
-  value: string | number | boolean,
+  value: string | number | boolean | object,
   type: VariableResolvedDataType
 ): VariableValue | null {
   if (type === 'COLOR') {
-    if (typeof value === 'string') {
-      const color = parseColor(value);
+    let colorValue = value;
+
+    // Handle object values with .value property (common in Style Dictionary)
+    if (typeof value === 'object' && value !== null && 'value' in value) {
+      colorValue = value.value;
+    }
+
+    if (typeof colorValue === 'string') {
+      const color = parseColor(colorValue);
       if (!color) {
-        throw new Error(`Invalid color value: ${value}`);
+        throw new Error(`Invalid color value: ${colorValue}`);
       }
       return color;
     }
-    throw new Error(`Color value must be a string, got ${typeof value}`);
+    throw new Error(`Color value must be a string, got ${typeof colorValue} (original: ${typeof value})`);
   }
 
   if (type === 'FLOAT') {
@@ -217,11 +225,12 @@ function getVariableName(path: string): string {
 /**
  * Transform Style Dictionary tokens to Figma variables
  */
-export function transformTokensToFigma(
+export async function transformTokensToFigma(
   tokens: StyleDictionaryTokens,
   options: {
     collectionName?: string; // Override collection name
     clearExisting?: boolean; // Clear existing variables
+    targetMode?: string; // Target mode to place variables in
   } = {}
 ): TransformResult {
   const result: TransformResult = {
@@ -261,20 +270,23 @@ export function transformTokensToFigma(
     for (const [collectionName, tokens] of tokensByCollection) {
       try {
         // Get or create collection
-        const existingCollection = figma.variables
-          .getLocalVariableCollections()
-          .find((c) => c.name === collectionName);
+        const existingCollections = await figma.variables.getLocalVariableCollectionsAsync();
+        const existingCollection = existingCollections.find((c) => c.name === collectionName);
 
-        const collection = getOrCreateCollection(collectionName);
+        const collection = await getOrCreateCollection(collectionName);
 
         if (!existingCollection) {
           result.collectionsCreated++;
         }
 
         // Track existing variables
+        const existingVariables = await Promise.all(
+          collection.variableIds.map(async (id) => {
+            return await figma.variables.getVariableByIdAsync(id);
+          })
+        );
         const existingVariableNames = new Set(
-          collection.variableIds
-            .map((id) => figma.variables.getVariableById(id))
+          existingVariables
             .filter((v): v is Variable => v !== null)
             .map((v) => v.name)
         );
@@ -298,13 +310,25 @@ export function transformTokensToFigma(
 
             const wasExisting = existingVariableNames.has(variableName);
 
-            setVariable(
-              collection,
-              variableName,
-              figmaType,
-              figmaValue,
-              token.comment
-            );
+            // Use mode-specific function if targetMode is specified
+            if (options.targetMode) {
+              await setVariableForMode(
+                collection,
+                variableName,
+                figmaType,
+                figmaValue,
+                options.targetMode,
+                token.comment
+              );
+            } else {
+              await setVariable(
+                collection,
+                variableName,
+                figmaType,
+                figmaValue,
+                token.comment
+              );
+            }
 
             if (wasExisting) {
               result.variablesUpdated++;
@@ -338,13 +362,63 @@ export function transformTokensToFigma(
 /**
  * Parse and validate Style Dictionary JSON
  */
+/**
+ * Resolve token references like {token.color.base.red.500.value}
+ */
+export function resolveTokenReferences(tokens: any, originalTokens?: any): any {
+  const rootTokens = originalTokens || tokens;
+
+  if (typeof tokens === 'string') {
+    // Check for token reference pattern
+    const referenceMatch = tokens.match(/^\{(.+)\}$/);
+    if (referenceMatch) {
+      const path = referenceMatch[1];
+
+      // Navigate the path in the token structure
+      const pathParts = path.split('.');
+      let value = rootTokens;
+
+      for (const part of pathParts) {
+        if (value && typeof value === 'object' && part in value) {
+          value = value[part];
+        } else {
+          console.warn(`Token reference not found: ${path}`);
+          return tokens; // Return original if not found
+        }
+      }
+
+      // If we found a value, recursively resolve it too
+      return resolveTokenReferences(value, rootTokens);
+    }
+
+    return tokens;
+  }
+
+  if (Array.isArray(tokens)) {
+    return tokens.map(item => resolveTokenReferences(item, rootTokens));
+  }
+
+  if (typeof tokens === 'object' && tokens !== null) {
+    const resolved: any = {};
+    for (const [key, value] of Object.entries(tokens)) {
+      resolved[key] = resolveTokenReferences(value, rootTokens);
+    }
+    return resolved;
+  }
+
+  return tokens;
+}
+
 export function parseStyleDictionary(jsonString: string): StyleDictionaryTokens {
   try {
-    const tokens = JSON.parse(jsonString);
+    let tokens = JSON.parse(jsonString);
 
     if (!tokens || typeof tokens !== 'object') {
       throw new Error('Invalid token file: expected JSON object');
     }
+
+    // Resolve all token references before processing
+    tokens = resolveTokenReferences(tokens);
 
     return tokens as StyleDictionaryTokens;
   } catch (error) {

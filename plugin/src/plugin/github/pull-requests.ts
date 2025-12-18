@@ -29,7 +29,7 @@ export async function createPullRequest(
   client: GitHubClient,
   options: CreatePROptions
 ): Promise<CreatePRResult> {
-  const config = (client as any).config;
+  const config = client.getConfig();
 
   try {
     // Step 1: Get base branch reference

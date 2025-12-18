@@ -14,6 +14,10 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
   const [repo, setRepo] = useState('');
   const [branch, setBranch] = useState('main');
   const [tokenPaths, setTokenPaths] = useState('tokens/**/*.json');
+  const [targetCollection, setTargetCollection] = useState('Allied Telesis');
+  const [targetMode, setTargetMode] = useState('');
+  const [availableModes, setAvailableModes] = useState<Array<{modeId: string, name: string}>>([]);
+  const [isLoadingModes, setIsLoadingModes] = useState(false);
 
   useEffect(() => {
     if (settings.github) {
@@ -22,8 +26,54 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
       setRepo(settings.github.repo || '');
       setBranch(settings.github.branch || 'main');
       setTokenPaths(settings.github.tokenPaths?.join(', ') || 'tokens/**/*.json');
+      setTargetCollection(settings.github.targetCollection || 'Allied Telesis');
+      setTargetMode(settings.github.targetMode || '');
     }
   }, [settings]);
+
+  // Handle collection change and fetch modes
+  const handleCollectionChange = (newCollection: string) => {
+    setTargetCollection(newCollection);
+    setTargetMode(''); // Reset mode when collection changes
+    setAvailableModes([]);
+
+    if (newCollection.trim()) {
+      setIsLoadingModes(true);
+      // Send message to plugin to get modes
+      parent.postMessage({
+        pluginMessage: {
+          type: 'GET_COLLECTION_MODES',
+          collectionName: newCollection.trim(),
+        },
+      }, '*');
+    }
+  };
+
+  // Listen for collection modes response
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      const { type, modes } = event.data.pluginMessage || {};
+      if (type === 'COLLECTION_MODES') {
+        setAvailableModes(modes || []);
+        setIsLoadingModes(false);
+
+        // Auto-select first mode if available
+        if (modes && modes.length > 0 && !targetMode) {
+          setTargetMode(modes[0].name);
+        }
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [targetMode]);
+
+  // Load modes for initial collection
+  useEffect(() => {
+    if (targetCollection && availableModes.length === 0) {
+      handleCollectionChange(targetCollection);
+    }
+  }, [targetCollection]);
 
   const handleSave = () => {
     const config: GitHubConfig = {
@@ -32,6 +82,8 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
       repo,
       branch,
       tokenPaths: tokenPaths.split(',').map((p) => p.trim()).filter(Boolean),
+      targetCollection: targetCollection.trim() || undefined,
+      targetMode: targetMode.trim() || undefined,
     };
 
     onSave({
@@ -47,6 +99,8 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
       repo,
       branch,
       tokenPaths: tokenPaths.split(',').map((p) => p.trim()).filter(Boolean),
+      targetCollection: targetCollection.trim() || undefined,
+      targetMode: targetMode.trim() || undefined,
     };
     onTest(config);
   };
@@ -120,6 +174,50 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
         />
         <span style={{ fontSize: '10px', color: 'var(--figma-color-text-secondary)' }}>
           Comma-separated paths or glob patterns (e.g., tokens/*.json)
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+        <label style={{ fontSize: '11px', fontWeight: 500 }}>Target Collection</label>
+        <input
+          type="text"
+          value={targetCollection}
+          onChange={(e) => handleCollectionChange(e.target.value)}
+          placeholder="Allied Telesis"
+          style={inputStyle}
+        />
+        <span style={{ fontSize: '10px', color: 'var(--figma-color-text-secondary)' }}>
+          Figma collection name to import tokens into
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+        <label style={{ fontSize: '11px', fontWeight: 500 }}>
+          Target Mode
+          {isLoadingModes && <span style={{ marginLeft: '8px', fontSize: '10px' }}>Loading...</span>}
+        </label>
+        <select
+          value={targetMode}
+          onChange={(e) => setTargetMode(e.target.value)}
+          disabled={availableModes.length === 0 || isLoadingModes}
+          style={{
+            ...inputStyle,
+            cursor: availableModes.length === 0 ? 'not-allowed' : 'pointer',
+          }}
+        >
+          <option value="">Select mode...</option>
+          {availableModes.map((mode) => (
+            <option key={mode.modeId} value={mode.name}>
+              {mode.name}
+            </option>
+          ))}
+        </select>
+        <span style={{ fontSize: '10px', color: 'var(--figma-color-text-secondary)' }}>
+          {availableModes.length > 0
+            ? `Found ${availableModes.length} mode(s) in collection`
+            : targetCollection
+              ? 'No modes found or collection doesn\'t exist'
+              : 'Enter collection name to load modes'}
         </span>
       </div>
 

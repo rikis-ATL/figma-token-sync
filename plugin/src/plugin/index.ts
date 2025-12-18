@@ -2,7 +2,8 @@ import { PluginMessage, UIMessage, PluginSettings, GitHubConfig } from '../share
 import { loadSettings, saveSettings } from './storage';
 import { GitHubClient, GitHubAPIError } from './github/api';
 import { findTokenFiles, getTokenFiles } from './github/files';
-import { parseStyleDictionary, transformTokensToFigma } from './transformers/sd-to-figma';
+import { parseStyleDictionary, transformTokensToFigma, resolveTokenReferences } from './transformers/sd-to-figma';
+import { getCollectionModes } from './figma-api/variables';
 import {
   transformFigmaToTokens,
   formatTokensAsJSON,
@@ -128,6 +129,24 @@ figma.ui.onmessage = async (msg: PluginMessage) => {
         break;
       }
 
+      case 'GET_COLLECTION_MODES': {
+        // Get modes for a specific collection
+        try {
+          const modes = await getCollectionModes(msg.collectionName);
+          sendToUI({
+            type: 'COLLECTION_MODES',
+            modes,
+          });
+        } catch (error) {
+          console.error('Failed to get collection modes:', error);
+          sendToUI({
+            type: 'COLLECTION_MODES',
+            modes: [],
+          });
+        }
+        break;
+      }
+
       default:
         console.warn('Unknown message type:', (msg as any).type);
     }
@@ -174,7 +193,26 @@ async function testGitHubConnection(
 
     // Additional validation: check token file paths
     if (config.tokenPaths && config.tokenPaths.length > 0) {
-      sendToUI({ type: 'SYNC_PROGRESS', message: 'Validating token file paths...' });
+      sendToUI({ type: 'SYNC_PROGRESS', message: 'Exploring repository structure...' });
+
+      // First, let's see what's in the root directory
+      try {
+        console.log('🔍 Attempting to list root directory...');
+        const rootResponse = await client.request<any>(
+          `/repos/${config.owner}/${config.repo}/contents?ref=${config.branch || 'main'}`
+        );
+        console.log('🗂️ Raw root response type:', typeof rootResponse, Array.isArray(rootResponse));
+        console.log('🗂️ Raw root response sample:', rootResponse[0] || rootResponse);
+
+        const rootFiles = Array.isArray(rootResponse) ? rootResponse : [rootResponse];
+        console.log('🗂️ Repository root contents:', rootFiles.map(f => `${f.name || f.filename || 'unknown'} (${f.type || 'unknown'})`));
+        sendToUI({ type: 'SYNC_PROGRESS', message: `Repository has ${rootFiles.length} items in root: ${rootFiles.slice(0, 5).map(f => f.name).join(', ')}${rootFiles.length > 5 ? '...' : ''}` });
+      } catch (error) {
+        console.error('Failed to list root directory:', error);
+        sendToUI({ type: 'SYNC_PROGRESS', message: 'Could not explore repository structure (continuing...)' });
+      }
+
+      sendToUI({ type: 'SYNC_PROGRESS', message: 'Searching for token files...' });
 
       // Find token files matching the patterns
       const tokenFiles = await findTokenFiles(client, config.tokenPaths, config.branch);
@@ -261,8 +299,51 @@ async function pullTokensFromGitHub(
       };
     }
 
-    // Step 3: Parse and transform each file
+    // Step 3: Parse and merge all token files first
     sendToUI({ type: 'SYNC_PROGRESS', message: 'Parsing token files...' });
+
+    const allTokens: any = {};
+    const parsedFiles: Array<{ path: string; tokens: any }> = [];
+
+    // First pass: Parse all files and merge into global token object
+    for (const file of fileContents) {
+      if (file.error) continue;
+
+      try {
+        // Clean and validate JSON content
+        let cleanContent = file.content.trim();
+
+        // Remove any BOM or hidden characters
+        cleanContent = cleanContent.replace(/^\uFEFF/, ''); // Remove BOM
+        cleanContent = cleanContent.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, ''); // Remove control chars
+
+        console.log(`📄 Cleaned content for ${file.path} (length: ${cleanContent.length}):`, cleanContent.substring(0, 200));
+
+        // Parse JSON (without reference resolution yet)
+        const rawTokens = JSON.parse(cleanContent);
+        if (!rawTokens || typeof rawTokens !== 'object') {
+          throw new Error('Invalid token file: expected JSON object');
+        }
+
+        // Deep merge into allTokens object
+        Object.assign(allTokens, rawTokens);
+        parsedFiles.push({ path: file.path, tokens: rawTokens });
+
+        console.log(`📦 Merged tokens from ${file.path}`);
+      } catch (error) {
+        console.error(`Failed to parse ${file.path}:`, error);
+        // Continue with other files
+      }
+    }
+
+    // Resolve all references globally
+    sendToUI({ type: 'SYNC_PROGRESS', message: 'Resolving token references...' });
+    const resolvedGlobalTokens = resolveTokenReferences(allTokens);
+
+    console.log(`🔗 Resolved ${Object.keys(allTokens).length} top-level token groups`);
+
+    // Step 4: Transform resolved tokens to Figma variables
+    sendToUI({ type: 'SYNC_PROGRESS', message: 'Creating Figma variables...' });
 
     let totalCollections = 0;
     let totalCreated = 0;
@@ -270,35 +351,30 @@ async function pullTokensFromGitHub(
     const allErrors: string[] = [];
     const allWarnings: string[] = [];
 
-    for (const file of fileContents) {
-      if (file.error) continue;
+    try {
+      // Transform all resolved tokens at once
+      const transformOptions = {
+        collectionName: config.targetCollection || undefined,
+        targetMode: config.targetMode || undefined
+      };
 
-      sendToUI({
-        type: 'SYNC_PROGRESS',
-        message: `Processing ${file.path}...`,
-      });
+      console.log(`🎯 Transform options:`, transformOptions);
 
-      try {
-        // Parse JSON
-        const tokens = parseStyleDictionary(file.content);
+      const result = await transformTokensToFigma(resolvedGlobalTokens, transformOptions);
 
-        // Transform to Figma variables
-        const result = transformTokensToFigma(tokens);
+      totalCollections += result.collectionsCreated;
+      totalCreated += result.variablesCreated;
+      totalUpdated += result.variablesUpdated;
+      allErrors.push(...result.errors);
+      allWarnings.push(...result.warnings);
 
-        totalCollections += result.collectionsCreated;
-        totalCreated += result.variablesCreated;
-        totalUpdated += result.variablesUpdated;
-        allErrors.push(...result.errors);
-        allWarnings.push(...result.warnings);
-
-        if (!result.success) {
-          console.error(`Failed to transform ${file.path}:`, result.errors);
-        }
-      } catch (error) {
-        const errorMsg = `Failed to process ${file.path}: ${error instanceof Error ? error.message : 'Unknown error'}`;
-        allErrors.push(errorMsg);
-        console.error(errorMsg);
+      if (!result.success) {
+        console.error('Failed to transform tokens:', result.errors);
       }
+    } catch (error) {
+      const errorMsg = `Failed to process tokens: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      allErrors.push(errorMsg);
+      console.error(errorMsg);
     }
 
     // Step 4: Report results
@@ -350,7 +426,7 @@ async function pushTokensToGitHub(
     // Step 1: Read Figma variables
     sendToUI({ type: 'SYNC_PROGRESS', message: 'Reading Figma variables...' });
 
-    const transformResult = transformFigmaToTokens({
+    const transformResult = await transformFigmaToTokens({
       organizeByCollection: true, // Create separate files per collection
     });
 
@@ -388,14 +464,28 @@ async function pushTokensToGitHub(
         targetPath = config.tokenPaths[0];
       } else {
         // Multiple files or glob pattern - use collection-based naming
-        // Extract directory from first pattern
-        const firstPattern = config.tokenPaths[0] || 'tokens';
-        const dir = firstPattern.includes('/')
-          ? firstPattern.substring(0, firstPattern.lastIndexOf('/'))
-          : 'tokens';
+        // Extract directory from first pattern, handling glob patterns
+        const firstPattern = config.tokenPaths[0] || 'tokens/**/*.json';
 
-        targetPath = `${dir}/${fileName}`;
+        // Extract base directory from glob pattern
+        let baseDir = 'tokens';
+        if (firstPattern.includes('/')) {
+          // For patterns like "tokens/**/*.json" or "tokens/globals/*.json"
+          const parts = firstPattern.split('/');
+          // Find the first part that doesn't contain wildcards
+          const nonWildcardParts = parts.filter(part => !part.includes('*'));
+          if (nonWildcardParts.length > 0) {
+            baseDir = nonWildcardParts.join('/');
+          } else {
+            // If all parts have wildcards, use first part
+            baseDir = parts[0] === '.' ? 'tokens' : parts[0];
+          }
+        }
+
+        targetPath = `${baseDir}/${fileName}`;
       }
+
+      console.log(`📁 Generated file path: ${targetPath} for collection file: ${fileName}`);
 
       const content = formatTokensAsJSON(tokens);
       files.push({ path: targetPath, content });

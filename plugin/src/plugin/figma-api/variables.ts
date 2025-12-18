@@ -23,8 +23,8 @@ export interface FigmaVariableCollection {
 /**
  * Get all variable collections in the current file
  */
-export function getAllVariableCollections(): FigmaVariableCollection[] {
-  const collections = figma.variables.getLocalVariableCollections();
+export async function getAllVariableCollections(): Promise<FigmaVariableCollection[]> {
+  const collections = await figma.variables.getLocalVariableCollectionsAsync();
   return collections.map((collection) => ({
     id: collection.id,
     name: collection.name,
@@ -37,18 +37,18 @@ export function getAllVariableCollections(): FigmaVariableCollection[] {
 /**
  * Get a variable collection by name
  */
-export function getVariableCollectionByName(
+export async function getVariableCollectionByName(
   name: string
-): VariableCollection | null {
-  const collections = figma.variables.getLocalVariableCollections();
+): Promise<VariableCollection | null> {
+  const collections = await figma.variables.getLocalVariableCollectionsAsync();
   return collections.find((c) => c.name === name) || null;
 }
 
 /**
  * Get or create a variable collection
  */
-export function getOrCreateCollection(name: string): VariableCollection {
-  let collection = getVariableCollectionByName(name);
+export async function getOrCreateCollection(name: string): Promise<VariableCollection> {
+  let collection = await getVariableCollectionByName(name);
 
   if (!collection) {
     collection = figma.variables.createVariableCollection(name);
@@ -59,38 +59,80 @@ export function getOrCreateCollection(name: string): VariableCollection {
 }
 
 /**
+ * Get all modes for a specific collection
+ */
+export async function getCollectionModes(collectionName: string): Promise<Array<{modeId: string, name: string}>> {
+  try {
+    const collection = await getVariableCollectionByName(collectionName);
+
+    if (!collection) {
+      console.log(`Collection "${collectionName}" not found`);
+      return [];
+    }
+
+    return collection.modes.map(mode => ({
+      modeId: mode.modeId,
+      name: mode.name
+    }));
+  } catch (error) {
+    console.error(`Failed to get modes for collection "${collectionName}":`, error);
+    return [];
+  }
+}
+
+/**
+ * Find mode ID by name in a collection
+ */
+export function getModeId(collection: VariableCollection, modeName?: string): string {
+  if (!modeName) {
+    return collection.defaultModeId;
+  }
+
+  const mode = collection.modes.find(m => m.name === modeName);
+  if (mode) {
+    return mode.modeId;
+  }
+
+  console.warn(`Mode "${modeName}" not found in collection "${collection.name}", using default mode`);
+  return collection.defaultModeId;
+}
+
+/**
  * Get all variables in a collection
  */
-export function getVariablesInCollection(
+export async function getVariablesInCollection(
   collection: VariableCollection
-): Variable[] {
-  return collection.variableIds
-    .map((id) => figma.variables.getVariableById(id))
-    .filter((v): v is Variable => v !== null);
+): Promise<Variable[]> {
+  const variables = await Promise.all(
+    collection.variableIds.map(async (id) => {
+      return await figma.variables.getVariableByIdAsync(id);
+    })
+  );
+  return variables.filter((v): v is Variable => v !== null);
 }
 
 /**
  * Get a variable by name within a collection
  */
-export function getVariableByName(
+export async function getVariableByName(
   collection: VariableCollection,
   name: string
-): Variable | null {
-  const variables = getVariablesInCollection(collection);
+): Promise<Variable | null> {
+  const variables = await getVariablesInCollection(collection);
   return variables.find((v) => v.name === name) || null;
 }
 
 /**
  * Create or update a variable in a collection
  */
-export function setVariable(
+export async function setVariable(
   collection: VariableCollection,
   name: string,
   type: VariableResolvedDataType,
   value: VariableValue,
   description?: string
-): Variable {
-  let variable = getVariableByName(collection, name);
+): Promise<Variable> {
+  let variable = await getVariableByName(collection, name);
 
   if (!variable) {
     // Create new variable
@@ -123,13 +165,60 @@ export function setVariable(
 }
 
 /**
+ * Create or update a variable in a collection with specific mode support
+ */
+export async function setVariableForMode(
+  collection: VariableCollection,
+  name: string,
+  type: VariableResolvedDataType,
+  value: VariableValue,
+  modeName?: string,
+  description?: string
+): Promise<Variable> {
+  let variable = await getVariableByName(collection, name);
+
+  if (!variable) {
+    // Create new variable
+    variable = figma.variables.createVariable(name, collection, type);
+    console.log(`Created variable: ${name} (${type})`);
+  } else {
+    // Update existing variable
+    if (variable.resolvedType !== type) {
+      console.warn(
+        `Variable ${name} type mismatch: expected ${type}, found ${variable.resolvedType}`
+      );
+      // Can't change type of existing variable, need to delete and recreate
+      const variableId = variable.id;
+      variable.remove();
+      variable = figma.variables.createVariable(name, collection, type);
+      console.log(`Recreated variable: ${name} with new type ${type}`);
+    }
+  }
+
+  // Get the target mode ID
+  const modeId = getModeId(collection, modeName);
+  const modeName_display = modeName || 'default';
+
+  // Set value for the specified mode
+  variable.setValueForMode(modeId, value);
+  console.log(`Set variable ${name} in mode "${modeName_display}"`);
+
+  // Set description if provided
+  if (description) {
+    variable.description = description;
+  }
+
+  return variable;
+}
+
+/**
  * Delete a variable by name
  */
-export function deleteVariable(
+export async function deleteVariable(
   collection: VariableCollection,
   name: string
-): boolean {
-  const variable = getVariableByName(collection, name);
+): Promise<boolean> {
+  const variable = await getVariableByName(collection, name);
   if (variable) {
     variable.remove();
     console.log(`Deleted variable: ${name}`);
@@ -141,16 +230,16 @@ export function deleteVariable(
 /**
  * Get all variables in the file (across all collections)
  */
-export function getAllVariables(): FigmaVariable[] {
-  const collections = getAllVariableCollections();
+export async function getAllVariables(): Promise<FigmaVariable[]> {
+  const collections = await getAllVariableCollections();
   const allVariables: FigmaVariable[] = [];
 
   for (const collection of collections) {
-    const figmaCollection = figma.variables.getVariableCollectionById(
+    const figmaCollection = await figma.variables.getVariableCollectionByIdAsync(
       collection.id
     );
     if (figmaCollection) {
-      const variables = getVariablesInCollection(figmaCollection);
+      const variables = await getVariablesInCollection(figmaCollection);
       allVariables.push(
         ...variables.map((v) => ({
           id: v.id,
@@ -170,8 +259,8 @@ export function getAllVariables(): FigmaVariable[] {
 /**
  * Delete a variable collection and all its variables
  */
-export function deleteCollection(name: string): boolean {
-  const collection = getVariableCollectionByName(name);
+export async function deleteCollection(name: string): Promise<boolean> {
+  const collection = await getVariableCollectionByName(name);
   if (collection) {
     collection.remove();
     console.log(`Deleted collection: ${name}`);
