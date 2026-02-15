@@ -467,7 +467,7 @@ export async function transformMultiBrandTokensToFigma(
   brandStructure: MultiBrandStructure,
   options: {
     collectionName?: string;
-    targetMode?: string;
+    // Note: targetMode is not used in multi-brand - modes are created from brand names
   } = {}
 ): Promise<TransformResult> {
   const result: TransformResult = {
@@ -488,30 +488,71 @@ export async function transformMultiBrandTokensToFigma(
       return result;
     }
 
-    // Step 1: Create base token foundation
-    console.log(`🔧 Creating base token foundation...`);
-    const baseTokens: StyleDictionaryTokens = {};
+    // Step 1: Create complete token foundation (base + global + all brands for reference resolution)
+    console.log(`🔧 Creating complete token foundation for reference resolution...`);
+
+    // Debug: Show file categorization
+    console.log(`📊 File categorization:`);
+    console.log(`   Base files: ${processedFiles.filter(f => f.category === 'base').length}`);
+    console.log(`   Global files: ${processedFiles.filter(f => f.category === 'global').length}`);
+    console.log(`   Brand files: ${processedFiles.filter(f => f.category === 'brand').length}`);
+
+    // First, create a complete token set including ALL tokens for reference resolution
+    const completeTokens: StyleDictionaryTokens = {};
 
     // Merge base files first
     const baseFiles = processedFiles.filter(f => f.category === 'base');
+    console.log(`🔧 Processing ${baseFiles.length} base files...`);
     for (const file of baseFiles) {
-      deepMerge(baseTokens, file.tokens);
+      deepMerge(completeTokens, file.tokens);
       console.log(`📦 Merged base file: ${file.path}`);
     }
 
     // Then merge global files
     const globalFiles = processedFiles.filter(f => f.category === 'global');
+    console.log(`🌐 Processing ${globalFiles.length} global files...`);
     for (const file of globalFiles) {
-      deepMerge(baseTokens, file.tokens);
+      deepMerge(completeTokens, file.tokens);
       console.log(`🌐 Merged global file: ${file.path}`);
     }
+
+    // Then merge ALL brand files for complete reference resolution
+    const brandFiles = processedFiles.filter(f => f.category === 'brand');
+    console.log(`🏷️ Processing ${brandFiles.length} brand files for reference resolution...`);
+    for (const file of brandFiles) {
+      deepMerge(completeTokens, file.tokens);
+      console.log(`🎨 Merged brand file for reference resolution: ${file.path}`);
+    }
+
+    console.log(`🔍 Complete tokens after merge:`, Object.keys(completeTokens));
+
+    // Resolve ALL token references using the complete token set
+    console.log(`🔗 Resolving all token references with complete token context...`);
+    const fullyResolvedTokens = resolveTokenReferences(completeTokens);
+    console.log(`✅ All token references resolved with complete context`);
+
+    // Now extract just the base/global portion for the foundation
+    const baseTokens: StyleDictionaryTokens = {};
+    for (const file of [...baseFiles, ...globalFiles]) {
+      deepMerge(baseTokens, file.tokens);
+    }
+
+    // Apply resolved references to base tokens only
+    const resolvedBaseTokens = resolveTokenReferences(baseTokens, fullyResolvedTokens);
+    console.log(`✅ Base tokens resolved using complete context`);
 
     // Step 2: Process each collection
     const tokensByCollection = new Map<string, FlatToken[]>();
 
-    // Start with base tokens
-    const flatBaseTokens = flattenTokens(baseTokens);
+    // Start with resolved base tokens
+    const flatBaseTokens = flattenTokens(resolvedBaseTokens);
     console.log(`🔧 Found ${flatBaseTokens.length} base/global tokens`);
+
+    if (flatBaseTokens.length === 0) {
+      console.warn(`⚠️  No base tokens found after flattening! Base tokens structure:`, baseTokens);
+    } else {
+      console.log(`📋 Sample base tokens:`, flatBaseTokens.slice(0, 3).map(t => `${t.path}=${t.value}`));
+    }
 
     for (const token of flatBaseTokens) {
       const collectionName = options.collectionName || getCollectionName(token.path);
@@ -604,7 +645,7 @@ export async function transformMultiBrandTokensToFigma(
           console.log(`🏷️ Processing brand: ${brand.name}`);
 
           // Create brand-specific token set
-          const brandTokens = JSON.parse(JSON.stringify(baseTokens)); // Deep clone base
+          const brandTokens = JSON.parse(JSON.stringify(resolvedBaseTokens)); // Deep clone resolved base
 
           // Merge brand-specific files
           const brandFiles = processedFiles.filter(f => f.brand === brand.name);
@@ -613,8 +654,13 @@ export async function transformMultiBrandTokensToFigma(
             console.log(`🎨 Merged brand file for ${brand.name}: ${file.path}`);
           }
 
+          // Resolve token references in brand tokens using complete context
+          console.log(`🔗 Resolving token references for brand: ${brand.name}`);
+          const resolvedBrandTokens = resolveTokenReferences(brandTokens, fullyResolvedTokens);
+          console.log(`✅ Token references resolved for brand: ${brand.name}`);
+
           // Flatten brand tokens
-          const flatBrandTokens = flattenTokens(brandTokens);
+          const flatBrandTokens = flattenTokens(resolvedBrandTokens);
 
           // Find tokens that exist in this collection
           const brandTokensForCollection = flatBrandTokens.filter(token => {

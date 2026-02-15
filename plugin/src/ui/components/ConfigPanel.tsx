@@ -10,7 +10,7 @@ interface ConfigPanelProps {
 }
 
 const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isLoading }) => {
-  const [authMethod, setAuthMethod] = useState<'token' | 'oauth'>('oauth');
+  const [authMethod, setAuthMethod] = useState<'token' | 'oauth'>('token');
   const [token, setToken] = useState('');
   const [oauthToken, setOauthToken] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
@@ -20,6 +20,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
   const [tokenPaths, setTokenPaths] = useState('tokens/**/*.json');
   const [targetCollection, setTargetCollection] = useState('Allied Telesis');
   const [targetMode, setTargetMode] = useState('');
+  const [modeStrategy, setModeStrategy] = useState<'auto' | 'target'>('auto');
   const [availableModes, setAvailableModes] = useState<Array<{modeId: string, name: string}>>([]);
   const [isLoadingModes, setIsLoadingModes] = useState(false);
 
@@ -34,6 +35,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
       setTokenPaths(settings.github.tokenPaths?.join(', ') || 'tokens/**/*.json');
       setTargetCollection(settings.github.targetCollection || 'Allied Telesis');
       setTargetMode(settings.github.targetMode || '');
+      setModeStrategy(settings.github.modeStrategy || 'auto');
 
       // Determine auth method based on what's available
       if (settings.github.oauthToken) {
@@ -89,6 +91,11 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
   }, [targetCollection]);
 
   const parseRepoUrl = (url: string) => {
+    if (!url || typeof url !== 'string') {
+      console.warn('⚠️  Invalid URL provided to parseRepoUrl:', url);
+      return { owner: '', repo: '' };
+    }
+
     const match = url.match(/github\.com[\/:]([^\/ ]+)\/([^\/ ]+)/);
     if (match) {
       return { owner: match[1], repo: match[2].replace(/\.git$/, '') };
@@ -115,6 +122,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
       tokenPaths: tokenPaths.split(',').map((p) => p.trim()).filter(Boolean),
       targetCollection: targetCollection.trim() || undefined,
       targetMode: targetMode.trim() || undefined,
+      modeStrategy,
     };
 
     onSave({
@@ -124,6 +132,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
   };
 
   const handleTest = () => {
+    alert('BUTTON CLICKED!');
     console.log('🔘 Test button clicked!');
     console.log('🔘 Current state:', {
       authMethod,
@@ -146,6 +155,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
       tokenPaths: tokenPaths.split(',').map((p) => p.trim()).filter(Boolean),
       targetCollection: targetCollection.trim() || undefined,
       targetMode: targetMode.trim() || undefined,
+      modeStrategy,
     };
     console.log('🔘 Test config created:', config);
     console.log('🔘 Config valid?', isConfigValid);
@@ -155,12 +165,22 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
     console.log('🔘 onTest called');
   };
 
-  const isConfigValid = (
-    (authMethod === 'oauth' ? oauthToken : token) &&
-    (owner && repo) &&
-    branch &&
-    tokenPaths
-  );
+  const hasAuth = authMethod === 'oauth' ? !!oauthToken : !!token;
+  const hasRepo = !!(owner && repo);
+  const hasBranch = !!branch;
+  const hasTokenPaths = !!tokenPaths;
+
+  const isConfigValid = hasAuth && hasRepo && hasBranch && hasTokenPaths;
+
+  console.log('🔍 Validation check:', {
+    authMethod,
+    hasAuth,
+    hasRepo: { owner, repo, hasRepo },
+    hasBranch: { branch, hasBranch },
+    hasTokenPaths: { tokenPaths, hasTokenPaths },
+    isConfigValid,
+    isLoading
+  });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -317,10 +337,26 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-        <label style={{ fontSize: '11px', fontWeight: 500 }}>
-          Target Mode
-          {isLoadingModes && <span style={{ marginLeft: '8px', fontSize: '10px' }}>Loading...</span>}
-        </label>
+        <label style={{ fontSize: '11px', fontWeight: 500 }}>Mode Handling Strategy</label>
+        <select
+          value={modeStrategy}
+          onChange={(e) => setModeStrategy(e.target.value as 'auto' | 'target')}
+          style={inputStyle}
+        >
+          <option value="auto">Auto (create modes from brands)</option>
+          <option value="target">Target Mode (use specified mode)</option>
+        </select>
+        <span style={{ fontSize: '10px', color: 'var(--figma-color-text-secondary)' }}>
+          Auto: Creates modes from brand folders. Target: Uses the specific mode below.
+        </span>
+      </div>
+
+      {modeStrategy === 'target' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          <label style={{ fontSize: '11px', fontWeight: 500 }}>
+            Target Mode
+            {isLoadingModes && <span style={{ marginLeft: '8px', fontSize: '10px' }}>Loading...</span>}
+          </label>
         <select
           value={targetMode}
           onChange={(e) => setTargetMode(e.target.value)}
@@ -343,10 +379,12 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
             : targetCollection
               ? 'No modes found or collection doesn\'t exist'
               : 'Enter collection name to load modes'}
+          {' '}Note: Only applies when using Target Mode strategy.
         </span>
-      </div>
+        </div>
+      )}
 
-      <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+      <div style={{ display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' }}>
         <button
           onClick={handleTest}
           disabled={!isConfigValid || isLoading}
@@ -360,6 +398,26 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
           style={{ ...buttonStyle, background: 'var(--figma-color-bg-brand)' }}
         >
           Save
+        </button>
+        <button
+          onClick={() => {
+            if (confirm('Clear all configuration and settings? This cannot be undone.')) {
+              setToken('');
+              setOauthToken('');
+              setRepoUrl('');
+              setOwner('');
+              setRepo('');
+              setBranch('main');
+              setTokenPaths('tokens/**/*.json');
+              setTargetCollection('');
+              setTargetMode('');
+              setModeStrategy('auto');
+              onSave({ github: undefined });
+            }
+          }}
+          style={{ ...buttonStyle, background: 'var(--figma-color-bg-danger)', color: 'white' }}
+        >
+          Clear Config
         </button>
       </div>
     </div>

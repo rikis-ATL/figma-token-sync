@@ -60,10 +60,18 @@ figma.ui.onmessage = async (msg: PluginMessage) => {
 
       case 'TEST_CONNECTION': {
         // Test GitHub connection
-        console.log('Plugin received TEST_CONNECTION with config:', msg.config);
+        console.log('🔗 Plugin received TEST_CONNECTION with config:', {
+          hasToken: !!msg.config.token,
+          hasOAuthToken: !!msg.config.oauthToken,
+          token: msg.config.token ? `${msg.config.token.substring(0, 4)}...${msg.config.token.substring(msg.config.token.length - 4)}` : 'none',
+          oauthToken: msg.config.oauthToken ? `${msg.config.oauthToken.substring(0, 4)}...${msg.config.oauthToken.substring(msg.config.oauthToken.length - 4)}` : 'none',
+          owner: msg.config.owner,
+          repo: msg.config.repo,
+          branch: msg.config.branch
+        });
         sendToUI({ type: 'SYNC_PROGRESS', message: 'Testing connection...' });
         const result = await testGitHubConnection(msg.config);
-        console.log('Test connection result:', result);
+        console.log('🔗 Test connection result:', result);
         sendToUI({
           type: 'CONNECTION_TESTED',
           success: result.success,
@@ -378,7 +386,10 @@ async function pullTokensFromGitHub(
     // Step 3: Detect multi-brand structure
     sendToUI({ type: 'SYNC_PROGRESS', message: 'Analyzing token structure...' });
 
-    const brandStructure = detectMultiBrandStructure(tokenFiles);
+    const brandStructure = detectMultiBrandStructure(
+      tokenFiles.map(path => ({ path })),
+      config.brandFolderPattern
+    );
     const isMultiBrandRepo = isMultiBrand(brandStructure);
 
     console.log(`🏢 Multi-brand structure detected: ${isMultiBrandRepo}`);
@@ -408,16 +419,20 @@ async function pullTokensFromGitHub(
     const allWarnings: string[] = [];
 
     try {
-      if (isMultiBrandRepo) {
-        // Multi-brand processing with proper mode creation
-        sendToUI({ type: 'SYNC_PROGRESS', message: 'Processing multi-brand tokens...' });
+      // Determine processing strategy based on configuration
+      const useMultiBrandProcessing = isMultiBrandRepo && config.modeStrategy !== 'target';
+
+      if (useMultiBrandProcessing) {
+        // Multi-brand processing with automatic mode creation from brand names
+        sendToUI({ type: 'SYNC_PROGRESS', message: 'Processing multi-brand tokens with automatic mode creation...' });
 
         const transformOptions = {
           collectionName: config.targetCollection || undefined,
-          targetMode: config.targetMode || undefined
+          // For multi-brand auto mode, we don't use targetMode - modes are created from brand names
         };
 
         console.log(`🎯 Multi-brand transform options:`, transformOptions);
+        console.log(`🎨 Mode strategy: auto (create modes from brand names)`);
 
         const result = await transformMultiBrandTokensToFigma(processedFiles, brandStructure, transformOptions);
 
@@ -431,8 +446,12 @@ async function pullTokensFromGitHub(
           console.error('Failed to transform multi-brand tokens:', result.errors);
         }
       } else {
-        // Single-brand/traditional processing
-        sendToUI({ type: 'SYNC_PROGRESS', message: 'Processing single-brand tokens...' });
+        // Single-brand/traditional processing OR multi-brand with target mode strategy
+        const processingMessage = isMultiBrandRepo
+          ? 'Processing multi-brand tokens with target mode strategy...'
+          : 'Processing single-brand tokens...';
+
+        sendToUI({ type: 'SYNC_PROGRESS', message: processingMessage });
 
         // Merge all tokens as before
         const allTokens: any = {};
@@ -451,7 +470,12 @@ async function pullTokensFromGitHub(
           targetMode: config.targetMode || undefined
         };
 
-        console.log(`🎯 Single-brand transform options:`, transformOptions);
+        if (isMultiBrandRepo) {
+          console.log(`🎯 Multi-brand target mode transform options:`, transformOptions);
+          console.log(`🎨 Mode strategy: target (use specified target mode instead of brand modes)`);
+        } else {
+          console.log(`🎯 Single-brand transform options:`, transformOptions);
+        }
 
         const result = await transformTokensToFigma(resolvedGlobalTokens, transformOptions);
 

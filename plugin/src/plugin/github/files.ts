@@ -124,8 +124,43 @@ export async function getFileContents(
       decodedContent = decodeBase64(cleanBase64);
     }
 
+    // Clean up the decoded content to remove null bytes and other invisible characters
+    // that might be causing "unexpected data at the end" errors
+    decodedContent = decodedContent.replace(/\0/g, ''); // Remove null bytes
+    decodedContent = decodedContent.trim(); // Remove leading/trailing whitespace
+
     console.log(`📄 Successfully decoded ${path}, length: ${decodedContent.length}`);
     console.log(`📄 Content preview for ${path}:`, decodedContent.substring(0, 100));
+    console.log(`📄 Content ending for ${path}:`, decodedContent.substring(Math.max(0, decodedContent.length - 100)));
+
+    // Debug: Show character codes at the end to detect invisible characters
+    const endChars = decodedContent.slice(-10);
+    const charCodes = Array.from(endChars).map(char => `${char}(${char.charCodeAt(0)})`).join(' ');
+    console.log(`📄 Last 10 chars for ${path}:`, charCodes);
+
+    // Debug: Check if content appears to be valid JSON
+    try {
+      JSON.parse(decodedContent);
+      console.log(`✅ ${path} appears to be valid JSON`);
+    } catch (parseError) {
+      console.error(`❌ ${path} JSON validation failed:`, parseError instanceof Error ? parseError.message : parseError);
+
+      // Show the problematic area if we can identify it
+      if (parseError instanceof SyntaxError && parseError.message.includes('line')) {
+        const lines = decodedContent.split('\n');
+        const lineMatch = parseError.message.match(/line (\d+)/);
+        if (lineMatch) {
+          const problemLine = parseInt(lineMatch[1]);
+          const start = Math.max(0, problemLine - 2);
+          const end = Math.min(lines.length, problemLine + 1);
+          console.error(`   Problem area around line ${problemLine}:`);
+          for (let i = start; i < end; i++) {
+            const marker = i === problemLine - 1 ? '>>> ' : '    ';
+            console.error(`   ${marker}${i + 1}: ${lines[i]}`);
+          }
+        }
+      }
+    }
 
     return {
       content: decodedContent,

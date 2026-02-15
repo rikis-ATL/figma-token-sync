@@ -4,6 +4,135 @@
 
 import { StyleDictionaryTokens } from './types';
 
+/**
+ * Robust JSON parser that can handle common JSON issues
+ */
+function robustParseJSON(content: string, filePath: string): any {
+  // First, try normal JSON parsing
+  try {
+    return JSON.parse(content);
+  } catch (initialError) {
+    console.warn(`⚠️  Initial JSON parse failed for ${filePath}, attempting recovery...`);
+    console.warn(`   Error: ${initialError instanceof Error ? initialError.message : 'Unknown'}`);
+
+    // Try common fixes
+    let cleanedContent = content;
+
+    try {
+      // Fix 1: Remove trailing commas before closing braces/brackets
+      cleanedContent = cleanedContent.replace(/,(\s*[}\]])/g, '$1');
+      console.log(`🔧 Applied trailing comma fix for ${filePath}`);
+
+      let result = JSON.parse(cleanedContent);
+      console.log(`✅ Fixed trailing commas in ${filePath}`);
+      return result;
+    } catch (error) {
+      // Continue to next fix
+    }
+
+    try {
+      // Fix 2: Remove comments (// style)
+      cleanedContent = content.replace(/\/\/.*$/gm, '');
+      cleanedContent = cleanedContent.replace(/,(\s*[}\]])/g, '$1');
+      console.log(`🔧 Applied comment removal fix for ${filePath}`);
+
+      let result = JSON.parse(cleanedContent);
+      console.log(`✅ Fixed comments in ${filePath}`);
+      return result;
+    } catch (error) {
+      // Continue to next fix
+    }
+
+    try {
+      // Fix 3: Remove /* */ style comments
+      cleanedContent = content.replace(/\/\*[\s\S]*?\*\//g, '');
+      cleanedContent = cleanedContent.replace(/,(\s*[}\]])/g, '$1');
+      console.log(`🔧 Applied block comment removal fix for ${filePath}`);
+
+      let result = JSON.parse(cleanedContent);
+      console.log(`✅ Fixed block comments in ${filePath}`);
+      return result;
+    } catch (error) {
+      // Continue to next fix
+    }
+
+    try {
+      // Fix 4: Try to find the JSON content if there's extra data at the end
+      const lines = content.split('\n');
+      let jsonEndIndex = -1;
+      let braceCount = 0;
+      let inString = false;
+      let escapeNext = false;
+
+      // Find where the main JSON object/array ends
+      for (let i = 0; i < content.length; i++) {
+        const char = content[i];
+
+        if (escapeNext) {
+          escapeNext = false;
+          continue;
+        }
+
+        if (char === '\\') {
+          escapeNext = true;
+          continue;
+        }
+
+        if (char === '"' && !escapeNext) {
+          inString = !inString;
+          continue;
+        }
+
+        if (!inString) {
+          if (char === '{' || char === '[') {
+            braceCount++;
+          } else if (char === '}' || char === ']') {
+            braceCount--;
+            if (braceCount === 0) {
+              jsonEndIndex = i;
+              break;
+            }
+          }
+        }
+      }
+
+      if (jsonEndIndex > 0) {
+        const truncatedContent = content.substring(0, jsonEndIndex + 1);
+        console.log(`🔧 Attempting to truncate extra data after position ${jsonEndIndex} for ${filePath}`);
+
+        let result = JSON.parse(truncatedContent);
+        console.log(`✅ Fixed by truncating extra data in ${filePath}`);
+        return result;
+      }
+    } catch (error) {
+      // Continue to final attempt
+    }
+
+    // Final attempt: Show detailed error and throw
+    console.error(`❌ All JSON recovery attempts failed for ${filePath}`);
+    console.error(`   Original error: ${initialError instanceof Error ? initialError.message : 'Unknown'}`);
+
+    // Show problematic lines around the error
+    if (initialError instanceof SyntaxError && initialError.message.includes('line')) {
+      const lineMatch = initialError.message.match(/line (\d+)/);
+      if (lineMatch) {
+        const problemLine = parseInt(lineMatch[1]);
+        const lines = content.split('\n');
+        const start = Math.max(0, problemLine - 3);
+        const end = Math.min(lines.length, problemLine + 2);
+
+        console.error(`   Context around line ${problemLine}:`);
+        for (let i = start; i < end; i++) {
+          const marker = i === problemLine - 1 ? '>>> ' : '    ';
+          console.error(`   ${marker}${i + 1}: ${lines[i]}`);
+        }
+      }
+    }
+
+    throw initialError;
+  }
+}
+
 export interface BrandInfo {
   name: string;
   path: string;
@@ -27,46 +156,84 @@ export interface ProcessedTokenFile {
 /**
  * Detect if the repository has multi-brand structure
  */
-export function detectMultiBrandStructure(tokenFiles: Array<{path: string}>): MultiBrandStructure {
+export function detectMultiBrandStructure(
+  tokenFiles: Array<{path: string}>,
+  brandFolderPattern?: string
+): MultiBrandStructure {
   const brands = new Map<string, BrandInfo>();
   const globalFiles: string[] = [];
   const baseFiles: string[] = [];
 
   console.log(`🔍 Analyzing ${tokenFiles.length} token files for multi-brand structure`);
+  console.log(`📋 File paths to analyze:`, tokenFiles.map(f => f.path));
 
   for (const file of tokenFiles) {
     const path = file.path;
     console.log(`  📄 Analyzing: ${path}`);
 
-    // Look for brand directory patterns
-    const brandMatch = path.match(/\/(?:brands?|themes?|variants?)\/([^\/]+)\//);
-    if (brandMatch) {
-      const brandName = brandMatch[1];
-      console.log(`    🏷️  Found brand: ${brandName}`);
-
-      if (!brands.has(brandName)) {
-        brands.set(brandName, {
-          name: brandName,
-          path: brandMatch[0],
-          files: []
-        });
-      }
-      brands.get(brandName)!.files.push(path);
+    // Look for brand directory patterns - add safety check
+    if (!path || typeof path !== 'string') {
+      console.error('⚠️  Invalid path provided to detectMultiBrandStructure:', path);
+      continue;
     }
-    // Look for global token patterns
-    else if (path.includes('/global/') || path.includes('global.json') || path.includes('globals.json')) {
+
+    // First check for global/base patterns before checking for brands
+    if (path.includes('/globals/') || path.includes('globals.json') || path.includes('/global/') || path.includes('global.json')) {
       console.log(`    🌐 Found global file: ${path}`);
       globalFiles.push(path);
     }
-    // Look for base token patterns
-    else if (path.includes('/base/') || path.includes('base.json') || path.includes('/core/') || path.includes('core.json')) {
+    // Look for base/core/palette token patterns
+    else if (path.includes('/base/') || path.includes('base.json') || path.includes('/core/') || path.includes('core.json') || path.includes('/palette/') || path.includes('palette.json')) {
       console.log(`    🔧 Found base file: ${path}`);
       baseFiles.push(path);
     }
-    // Files in root or other directories might be global
+    // Then match Style Dictionary multi-brand patterns:
+    // 1. /brands/brandName/ or /themes/brandName/ or /variants/brandName/ (or custom pattern)
+    // 2. tokens/brandName/category (Style Dictionary format) - but exclude common global/base names
     else {
-      console.log(`    📝 Treating as global: ${path}`);
-      globalFiles.push(path);
+      // Create regex pattern based on configuration
+      const defaultPatterns = ['brands?', 'themes?', 'variants?'];
+      const brandPatterns = brandFolderPattern
+        ? [brandFolderPattern, ...defaultPatterns]
+        : defaultPatterns;
+
+      console.log(`🔍 Using brand folder patterns: ${brandPatterns.join(', ')}`);
+
+      // Build regex dynamically based on patterns
+      const brandFolderRegex = new RegExp(`\\/(${brandPatterns.join('|')})\\/([^\\/]+)\\/`);
+
+      let brandMatch = path.match(brandFolderRegex) ||
+                       path.match(/\/tokens\/([^\/]+)\//) ||
+                       path.match(/^([^\/]+)\/tokens\//) ||
+                       path.match(/^tokens\/([^\/]+)\//);
+
+      if (brandMatch) {
+        // For brandFolderRegex, brand name is in capture group 2, for others it's group 1
+        const brandName = brandMatch[2] || brandMatch[1];
+
+        // Skip common global/base directory names
+        const excludedNames = ['globals', 'global', 'base', 'core', 'palette', 'foundation', 'primitives', 'common'];
+        if (!excludedNames.includes(brandName.toLowerCase())) {
+          console.log(`    🏷️  Found brand: ${brandName}`);
+
+          if (!brands.has(brandName)) {
+            brands.set(brandName, {
+              name: brandName,
+              path: brandMatch[0],
+              files: []
+            });
+          }
+          brands.get(brandName)!.files.push(path);
+        } else {
+          console.log(`    🌐 Treating excluded name "${brandName}" as global: ${path}`);
+          globalFiles.push(path);
+        }
+      }
+      // Files in root or other directories might be global
+      else {
+        console.log(`    📝 Treating as global: ${path}`);
+        globalFiles.push(path);
+      }
     }
   }
 
@@ -114,8 +281,18 @@ export function categorizeTokenFiles(
     }
 
     try {
-      // Parse the JSON content
-      const tokens = JSON.parse(file.content);
+      // Debug: Log file info before parsing
+      console.log(`🔍 About to parse ${file.path} (${file.content.length} chars)`);
+      console.log(`📄 Content preview: ${file.content.substring(0, 100)}...`);
+
+      // Parse the JSON content with robust error recovery
+      const tokens = robustParseJSON(file.content, file.path);
+      console.log(`✅ Successfully parsed ${file.path}`);
+
+      if (!tokens || typeof tokens !== 'object') {
+        console.warn(`⚠️  Invalid token structure in ${file.path}: expected object, got ${typeof tokens}`);
+        continue;
+      }
 
       // Determine category and brand
       let category: 'base' | 'global' | 'brand' = 'global';

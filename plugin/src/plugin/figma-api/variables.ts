@@ -300,6 +300,11 @@ export function parseColor(colorString: string): RGBA | null {
   }
 
   // RGB/RGBA format: rgb(r, g, b) or rgba(r, g, b, a)
+  if (!color || typeof color !== 'string') {
+    console.error('⚠️  Invalid color value provided to parseColor:', color);
+    return null;
+  }
+
   const rgbMatch = color.match(
     /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)/
   );
@@ -319,6 +324,11 @@ export function parseColor(colorString: string): RGBA | null {
  * Parse dimension string to number (strips units)
  */
 export function parseDimension(dimensionString: string): number {
+  if (!dimensionString || typeof dimensionString !== 'string') {
+    console.error('⚠️  Invalid dimension string provided to parseDimension:', dimensionString);
+    return 0;
+  }
+
   const dimension = dimensionString.trim();
 
   // Extract numeric value (handles px, rem, em, pt, etc.)

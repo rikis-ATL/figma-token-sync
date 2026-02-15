@@ -12,7 +12,9 @@ export interface GitHubConfig {
   branch: string;
   tokenPaths: string[];
   targetCollection?: string; // Collection to import tokens into
-  targetMode?: string; // Mode to place tokens in
+  targetMode?: string; // Mode to place tokens in (only used when modeStrategy is 'target')
+  brandFolderPattern?: string; // Pattern for brand folders (e.g., "brands", "themes", "variants")
+  modeStrategy?: 'auto' | 'target'; // 'auto' = create modes from brands, 'target' = use targetMode
 }
 
 export interface LastSync {
