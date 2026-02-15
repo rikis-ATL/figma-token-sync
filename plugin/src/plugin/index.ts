@@ -1,8 +1,14 @@
-import { PluginMessage, UIMessage, PluginSettings, GitHubConfig } from '../shared/types';
+import { PluginMessage, UIMessage, PluginSettings, GitHubConfig, FileStructureMapping } from '../shared/types';
 import { loadSettings, saveSettings } from './storage';
 import { GitHubClient, GitHubAPIError } from './github/api';
+import { GitHubOAuth } from './github/oauth';
 import { findTokenFiles, getTokenFiles } from './github/files';
-import { parseStyleDictionary, transformTokensToFigma, resolveTokenReferences } from './transformers/sd-to-figma';
+import {
+  parseStyleDictionary,
+  transformTokensToFigma,
+  transformMultiBrandTokensToFigma,
+  resolveTokenReferences
+} from './transformers/sd-to-figma';
 import { getCollectionModes } from './figma-api/variables';
 import {
   transformFigmaToTokens,
@@ -14,6 +20,16 @@ import {
   generatePRTitle,
   generatePRBody,
 } from './github/pull-requests';
+import {
+  detectMultiBrandStructure,
+  categorizeTokenFiles,
+  isMultiBrand,
+  getBrandNames,
+  deepMerge,
+} from '../shared/multi-brand-utils';
+
+console.log('🚀 Plugin loading - Figma Token Sync Plugin Started!');
+console.log('🚀 Build timestamp:', new Date().toISOString());
 
 // Show the plugin UI
 figma.showUI(__html__, {
@@ -21,6 +37,8 @@ figma.showUI(__html__, {
   height: 600,
   themeColors: true,
 });
+
+console.log('🚀 UI shown');
 
 // Handle messages from UI
 figma.ui.onmessage = async (msg: PluginMessage) => {
@@ -42,8 +60,10 @@ figma.ui.onmessage = async (msg: PluginMessage) => {
 
       case 'TEST_CONNECTION': {
         // Test GitHub connection
+        console.log('Plugin received TEST_CONNECTION with config:', msg.config);
         sendToUI({ type: 'SYNC_PROGRESS', message: 'Testing connection...' });
         const result = await testGitHubConnection(msg.config);
+        console.log('Test connection result:', result);
         sendToUI({
           type: 'CONNECTION_TESTED',
           success: result.success,
@@ -147,6 +167,46 @@ figma.ui.onmessage = async (msg: PluginMessage) => {
         break;
       }
 
+      case 'START_OAUTH_FLOW': {
+        // Start GitHub OAuth device flow
+        try {
+          sendToUI({ type: 'SYNC_PROGRESS', message: 'Starting OAuth flow...' });
+          const deviceCodeResponse = await GitHubOAuth.startDeviceFlow();
+          sendToUI({
+            type: 'OAUTH_DEVICE_CODE',
+            userCode: deviceCodeResponse.user_code,
+            verificationUri: deviceCodeResponse.verification_uri,
+            interval: deviceCodeResponse.interval,
+            deviceCode: deviceCodeResponse.device_code,
+          });
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Failed to start OAuth flow';
+          sendToUI({
+            type: 'OAUTH_ERROR',
+            message: errorMessage,
+          });
+        }
+        break;
+      }
+
+      case 'POLL_OAUTH_TOKEN': {
+        // Poll for OAuth token
+        try {
+          const token = await GitHubOAuth.pollForToken(msg.deviceCode, msg.interval);
+          sendToUI({
+            type: 'OAUTH_SUCCESS',
+            token,
+          });
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'OAuth authentication failed';
+          sendToUI({
+            type: 'OAUTH_ERROR',
+            message: errorMessage,
+          });
+        }
+        break;
+      }
+
       default:
         console.warn('Unknown message type:', (msg as any).type);
     }
@@ -176,11 +236,27 @@ function sendToUI(message: UIMessage) {
   figma.ui.postMessage(message);
 }
 
-// Test GitHub connection with comprehensive validation
+// Test GitHub connection with comprehensive validation including OAuth support
 async function testGitHubConnection(
   config: GitHubConfig
 ): Promise<{ success: boolean; message: string }> {
   try {
+    // Ensure we have either token or oauthToken
+    if (!config.token && !config.oauthToken) {
+      return {
+        success: false,
+        message: 'No authentication token provided. Please authenticate with GitHub first.',
+      };
+    }
+
+    // Ensure we have repository info
+    if (!config.owner || !config.repo) {
+      return {
+        success: false,
+        message: 'Repository owner and name are required.',
+      };
+    }
+
     const client = new GitHubClient(config);
 
     // Run comprehensive connection test
@@ -299,50 +375,30 @@ async function pullTokensFromGitHub(
       };
     }
 
-    // Step 3: Parse and merge all token files first
-    sendToUI({ type: 'SYNC_PROGRESS', message: 'Parsing token files...' });
+    // Step 3: Detect multi-brand structure
+    sendToUI({ type: 'SYNC_PROGRESS', message: 'Analyzing token structure...' });
 
-    const allTokens: any = {};
-    const parsedFiles: Array<{ path: string; tokens: any }> = [];
+    const brandStructure = detectMultiBrandStructure(tokenFiles);
+    const isMultiBrandRepo = isMultiBrand(brandStructure);
 
-    // First pass: Parse all files and merge into global token object
-    for (const file of fileContents) {
-      if (file.error) continue;
-
-      try {
-        // Clean and validate JSON content
-        let cleanContent = file.content.trim();
-
-        // Remove any BOM or hidden characters
-        cleanContent = cleanContent.replace(/^\uFEFF/, ''); // Remove BOM
-        cleanContent = cleanContent.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, ''); // Remove control chars
-
-        console.log(`📄 Cleaned content for ${file.path} (length: ${cleanContent.length}):`, cleanContent.substring(0, 200));
-
-        // Parse JSON (without reference resolution yet)
-        const rawTokens = JSON.parse(cleanContent);
-        if (!rawTokens || typeof rawTokens !== 'object') {
-          throw new Error('Invalid token file: expected JSON object');
-        }
-
-        // Deep merge into allTokens object
-        Object.assign(allTokens, rawTokens);
-        parsedFiles.push({ path: file.path, tokens: rawTokens });
-
-        console.log(`📦 Merged tokens from ${file.path}`);
-      } catch (error) {
-        console.error(`Failed to parse ${file.path}:`, error);
-        // Continue with other files
-      }
+    console.log(`🏢 Multi-brand structure detected: ${isMultiBrandRepo}`);
+    if (isMultiBrandRepo) {
+      console.log(`🏷️ Brands found: ${getBrandNames(brandStructure).join(', ')}`);
     }
 
-    // Resolve all references globally
-    sendToUI({ type: 'SYNC_PROGRESS', message: 'Resolving token references...' });
-    const resolvedGlobalTokens = resolveTokenReferences(allTokens);
+    // Step 4: Parse and categorize token files
+    sendToUI({ type: 'SYNC_PROGRESS', message: 'Parsing token files...' });
 
-    console.log(`🔗 Resolved ${Object.keys(allTokens).length} top-level token groups`);
+    const processedFiles = categorizeTokenFiles(fileContents, brandStructure);
 
-    // Step 4: Transform resolved tokens to Figma variables
+    if (processedFiles.length === 0) {
+      return {
+        success: false,
+        message: 'No valid token files found to process',
+      };
+    }
+
+    // Step 5: Transform tokens based on structure type
     sendToUI({ type: 'SYNC_PROGRESS', message: 'Creating Figma variables...' });
 
     let totalCollections = 0;
@@ -352,24 +408,62 @@ async function pullTokensFromGitHub(
     const allWarnings: string[] = [];
 
     try {
-      // Transform all resolved tokens at once
-      const transformOptions = {
-        collectionName: config.targetCollection || undefined,
-        targetMode: config.targetMode || undefined
-      };
+      if (isMultiBrandRepo) {
+        // Multi-brand processing with proper mode creation
+        sendToUI({ type: 'SYNC_PROGRESS', message: 'Processing multi-brand tokens...' });
 
-      console.log(`🎯 Transform options:`, transformOptions);
+        const transformOptions = {
+          collectionName: config.targetCollection || undefined,
+          targetMode: config.targetMode || undefined
+        };
 
-      const result = await transformTokensToFigma(resolvedGlobalTokens, transformOptions);
+        console.log(`🎯 Multi-brand transform options:`, transformOptions);
 
-      totalCollections += result.collectionsCreated;
-      totalCreated += result.variablesCreated;
-      totalUpdated += result.variablesUpdated;
-      allErrors.push(...result.errors);
-      allWarnings.push(...result.warnings);
+        const result = await transformMultiBrandTokensToFigma(processedFiles, brandStructure, transformOptions);
 
-      if (!result.success) {
-        console.error('Failed to transform tokens:', result.errors);
+        totalCollections += result.collectionsCreated;
+        totalCreated += result.variablesCreated;
+        totalUpdated += result.variablesUpdated;
+        allErrors.push(...result.errors);
+        allWarnings.push(...result.warnings);
+
+        if (!result.success) {
+          console.error('Failed to transform multi-brand tokens:', result.errors);
+        }
+      } else {
+        // Single-brand/traditional processing
+        sendToUI({ type: 'SYNC_PROGRESS', message: 'Processing single-brand tokens...' });
+
+        // Merge all tokens as before
+        const allTokens: any = {};
+        for (const file of processedFiles) {
+          Object.assign(allTokens, file.tokens);
+          console.log(`📦 Merged tokens from ${file.path}`);
+        }
+
+        // Resolve all references globally
+        const resolvedGlobalTokens = resolveTokenReferences(allTokens);
+        console.log(`🔗 Resolved ${Object.keys(allTokens).length} top-level token groups`);
+
+        // Transform all resolved tokens at once
+        const transformOptions = {
+          collectionName: config.targetCollection || undefined,
+          targetMode: config.targetMode || undefined
+        };
+
+        console.log(`🎯 Single-brand transform options:`, transformOptions);
+
+        const result = await transformTokensToFigma(resolvedGlobalTokens, transformOptions);
+
+        totalCollections += result.collectionsCreated;
+        totalCreated += result.variablesCreated;
+        totalUpdated += result.variablesUpdated;
+        allErrors.push(...result.errors);
+        allWarnings.push(...result.warnings);
+
+        if (!result.success) {
+          console.error('Failed to transform tokens:', result.errors);
+        }
       }
     } catch (error) {
       const errorMsg = `Failed to process tokens: ${error instanceof Error ? error.message : 'Unknown error'}`;
@@ -377,7 +471,7 @@ async function pullTokensFromGitHub(
       console.error(errorMsg);
     }
 
-    // Step 4: Report results
+    // Step 6: Report results
     if (allErrors.length > 0) {
       return {
         success: false,
@@ -387,9 +481,14 @@ async function pullTokensFromGitHub(
 
     const summary = [
       `✓ Successfully imported ${fileContents.length} token file(s)`,
+      isMultiBrandRepo ? `✓ Multi-brand structure with ${getBrandNames(brandStructure).length} brands: ${getBrandNames(brandStructure).join(', ')}` : `✓ Single-brand structure`,
       `✓ Collections: ${totalCollections} created`,
       `✓ Variables: ${totalCreated} created, ${totalUpdated} updated`,
     ];
+
+    if (isMultiBrandRepo) {
+      summary.push(`✓ Modes created: Default + ${getBrandNames(brandStructure).join(', ')}`);
+    }
 
     if (allWarnings.length > 0) {
       summary.push(`⚠ Warnings: ${allWarnings.length}`);

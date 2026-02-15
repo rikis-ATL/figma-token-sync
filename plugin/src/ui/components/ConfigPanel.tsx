@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { PluginSettings, GitHubConfig } from '../../shared/types';
+import GitHubAuth from './GitHubAuth';
 
 interface ConfigPanelProps {
   settings: PluginSettings;
@@ -9,7 +10,10 @@ interface ConfigPanelProps {
 }
 
 const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isLoading }) => {
+  const [authMethod, setAuthMethod] = useState<'token' | 'oauth'>('oauth');
   const [token, setToken] = useState('');
+  const [oauthToken, setOauthToken] = useState('');
+  const [repoUrl, setRepoUrl] = useState('');
   const [owner, setOwner] = useState('');
   const [repo, setRepo] = useState('');
   const [branch, setBranch] = useState('main');
@@ -22,12 +26,21 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
   useEffect(() => {
     if (settings.github) {
       setToken(settings.github.token || '');
+      setOauthToken(settings.github.oauthToken || '');
+      setRepoUrl(settings.github.repoUrl || '');
       setOwner(settings.github.owner || '');
       setRepo(settings.github.repo || '');
       setBranch(settings.github.branch || 'main');
       setTokenPaths(settings.github.tokenPaths?.join(', ') || 'tokens/**/*.json');
       setTargetCollection(settings.github.targetCollection || 'Allied Telesis');
       setTargetMode(settings.github.targetMode || '');
+
+      // Determine auth method based on what's available
+      if (settings.github.oauthToken) {
+        setAuthMethod('oauth');
+      } else if (settings.github.token) {
+        setAuthMethod('token');
+      }
     }
   }, [settings]);
 
@@ -75,11 +88,29 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
     }
   }, [targetCollection]);
 
+  const parseRepoUrl = (url: string) => {
+    const match = url.match(/github\.com[\/:]([^\/ ]+)\/([^\/ ]+)/);
+    if (match) {
+      return { owner: match[1], repo: match[2].replace(/\.git$/, '') };
+    }
+    return { owner: '', repo: '' };
+  };
+
+  const handleRepoUrlChange = (url: string) => {
+    setRepoUrl(url);
+    if (url) {
+      const { owner: parsedOwner, repo: parsedRepo } = parseRepoUrl(url);
+      setOwner(parsedOwner);
+      setRepo(parsedRepo);
+    }
+  };
+
   const handleSave = () => {
     const config: GitHubConfig = {
-      token,
-      owner,
-      repo,
+      ...(authMethod === 'oauth' ? { oauthToken } : { token }),
+      repoUrl: repoUrl || undefined,
+      owner: owner || undefined,
+      repo: repo || undefined,
       branch,
       tokenPaths: tokenPaths.split(',').map((p) => p.trim()).filter(Boolean),
       targetCollection: targetCollection.trim() || undefined,
@@ -93,60 +124,154 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ settings, onSave, onTest, isL
   };
 
   const handleTest = () => {
-    const config: GitHubConfig = {
-      token,
+    console.log('🔘 Test button clicked!');
+    console.log('🔘 Current state:', {
+      authMethod,
+      token: token ? `${token.substring(0, 8)}...` : 'empty',
+      oauthToken: oauthToken ? `${oauthToken.substring(0, 8)}...` : 'empty',
+      repoUrl,
       owner,
       repo,
+      branch,
+      tokenPaths,
+      isLoading
+    });
+
+    const config: GitHubConfig = {
+      ...(authMethod === 'oauth' ? { oauthToken } : { token }),
+      repoUrl: repoUrl || undefined,
+      owner: owner || undefined,
+      repo: repo || undefined,
       branch,
       tokenPaths: tokenPaths.split(',').map((p) => p.trim()).filter(Boolean),
       targetCollection: targetCollection.trim() || undefined,
       targetMode: targetMode.trim() || undefined,
     };
+    console.log('🔘 Test config created:', config);
+    console.log('🔘 Config valid?', isConfigValid);
+    console.log('🔘 Button disabled?', !isConfigValid || isLoading);
+    console.log('🔘 About to call onTest...');
     onTest(config);
+    console.log('🔘 onTest called');
   };
 
-  const isConfigValid = token && owner && repo && branch && tokenPaths;
+  const isConfigValid = (
+    (authMethod === 'oauth' ? oauthToken : token) &&
+    (owner && repo) &&
+    branch &&
+    tokenPaths
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
       <h3 style={{ margin: 0, fontSize: '12px', fontWeight: 600 }}>GitHub Configuration</h3>
 
+      {/* Authentication Method Toggle */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-        <label style={{ fontSize: '11px', fontWeight: 500 }}>Personal Access Token</label>
+        <label style={{ fontSize: '11px', fontWeight: 500 }}>Authentication Method</label>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px' }}>
+            <input
+              type="radio"
+              checked={authMethod === 'oauth'}
+              onChange={() => setAuthMethod('oauth')}
+            />
+            OAuth (Recommended)
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px' }}>
+            <input
+              type="radio"
+              checked={authMethod === 'token'}
+              onChange={() => setAuthMethod('token')}
+            />
+            Personal Access Token
+          </label>
+        </div>
+      </div>
+
+      {/* Authentication Section */}
+      {authMethod === 'oauth' ? (
+        oauthToken ? (
+          <div style={{ padding: '8px', background: 'var(--figma-color-bg-success)', borderRadius: '4px' }}>
+            <span style={{ fontSize: '11px', color: 'var(--figma-color-text-success)' }}>✓ Authenticated with GitHub</span>
+            <button
+              onClick={() => setOauthToken('')}
+              style={{
+                marginLeft: '8px',
+                padding: '2px 6px',
+                fontSize: '10px',
+                border: 'none',
+                background: 'transparent',
+                color: 'var(--figma-color-text-success)',
+                textDecoration: 'underline',
+                cursor: 'pointer'
+              }}
+            >
+              Reset
+            </button>
+          </div>
+        ) : (
+          <GitHubAuth
+            onTokenReceived={setOauthToken}
+            isLoading={isLoading}
+          />
+        )
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          <label style={{ fontSize: '11px', fontWeight: 500 }}>Personal Access Token</label>
+          <input
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder="ghp_xxxxxxxxxxxx"
+            style={inputStyle}
+          />
+          <span style={{ fontSize: '10px', color: 'var(--figma-color-text-secondary)' }}>
+            Requires 'repo' scope. <a href="https://github.com/settings/tokens" target="_blank" style={{ color: 'var(--figma-color-text-brand)' }}>Generate token</a>
+          </span>
+        </div>
+      )}
+
+      {/* Repository Configuration */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+        <label style={{ fontSize: '11px', fontWeight: 500 }}>Repository URL</label>
         <input
-          type="password"
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          placeholder="ghp_xxxxxxxxxxxx"
+          type="text"
+          value={repoUrl}
+          onChange={(e) => handleRepoUrlChange(e.target.value)}
+          placeholder="https://github.com/owner/repo or owner/repo"
           style={inputStyle}
         />
         <span style={{ fontSize: '10px', color: 'var(--figma-color-text-secondary)' }}>
-          Requires 'repo' scope
+          GitHub repository URL or owner/repo format
         </span>
       </div>
 
-      <div style={{ display: 'flex', gap: '8px' }}>
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <label style={{ fontSize: '11px', fontWeight: 500 }}>Owner</label>
-          <input
-            type="text"
-            value={owner}
-            onChange={(e) => setOwner(e.target.value)}
-            placeholder="owner"
-            style={inputStyle}
-          />
+      {/* Auto-filled Owner/Repo (read-only display) */}
+      {(owner || repo) && (
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <label style={{ fontSize: '11px', fontWeight: 500, color: 'var(--figma-color-text-secondary)' }}>Owner</label>
+            <input
+              type="text"
+              value={owner}
+              onChange={(e) => setOwner(e.target.value)}
+              placeholder="owner"
+              style={{ ...inputStyle, background: 'var(--figma-color-bg-secondary)' }}
+            />
+          </div>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <label style={{ fontSize: '11px', fontWeight: 500, color: 'var(--figma-color-text-secondary)' }}>Repository</label>
+            <input
+              type="text"
+              value={repo}
+              onChange={(e) => setRepo(e.target.value)}
+              placeholder="repo"
+              style={{ ...inputStyle, background: 'var(--figma-color-bg-secondary)' }}
+            />
+          </div>
         </div>
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <label style={{ fontSize: '11px', fontWeight: 500 }}>Repository</label>
-          <input
-            type="text"
-            value={repo}
-            onChange={(e) => setRepo(e.target.value)}
-            placeholder="repo"
-            style={inputStyle}
-          />
-        </div>
-      </div>
+      )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
         <label style={{ fontSize: '11px', fontWeight: 500 }}>Branch</label>

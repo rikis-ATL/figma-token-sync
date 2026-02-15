@@ -1,6 +1,33 @@
 import React from 'react';
 import { PluginSettings, GitHubConfig } from '../../shared/types';
 
+// Simple validation function updated for OAuth support
+const validateGitHubConfig = (config: GitHubConfig) => {
+  const hasAuth = Boolean(config.token || config.oauthToken);
+  const hasRepo = Boolean(config.owner && config.repo);
+  const hasBranch = Boolean(config.branch);
+  const hasTokenPaths = Boolean(config.tokenPaths?.length > 0);
+
+  console.log('🔧 SyncPanel validation:', {
+    hasAuth,
+    hasRepo,
+    hasBranch,
+    hasTokenPaths,
+    config: {
+      token: config.token ? 'present' : 'missing',
+      oauthToken: config.oauthToken ? 'present' : 'missing',
+      owner: config.owner,
+      repo: config.repo,
+      branch: config.branch,
+      tokenPaths: config.tokenPaths
+    }
+  });
+
+  return {
+    valid: Boolean(config && hasAuth && hasRepo && hasBranch && hasTokenPaths)
+  };
+};
+
 interface SyncPanelProps {
   settings: PluginSettings;
   onPull: (config: GitHubConfig) => void;
@@ -9,17 +36,26 @@ interface SyncPanelProps {
 }
 
 const SyncPanel: React.FC<SyncPanelProps> = ({ settings, onPull, onPush, isSyncing }) => {
-  const isConfigured = settings.github?.token && settings.github?.owner && settings.github?.repo;
+  // Check if GitHub config is valid using the validation utility
+  const isConfigured = settings.github ? validateGitHubConfig(settings.github).valid : false;
 
   const handlePull = () => {
+    console.log('🔽 Pull button clicked');
     if (settings.github) {
+      console.log('🔽 Calling onPull with config:', settings.github);
       onPull(settings.github);
+    } else {
+      console.log('🔽 No GitHub config available');
     }
   };
 
   const handlePush = () => {
+    console.log('🔼 Push button clicked');
     if (settings.github) {
+      console.log('🔼 Calling onPush with config:', settings.github);
       onPush(settings.github);
+    } else {
+      console.log('🔼 No GitHub config available');
     }
   };
 

@@ -20,12 +20,7 @@ export class GitHubAPIError extends Error {
   }
 }
 
-export interface GitHubConfig {
-  token: string;
-  owner: string;
-  repo: string;
-  branch?: string;
-}
+import { GitHubConfig } from '../../shared/types';
 
 export class GitHubClient {
   private config: GitHubConfig;
@@ -43,6 +38,13 @@ export class GitHubClient {
   }
 
   /**
+   * Get the authentication token (either personal access token or OAuth token)
+   */
+  private getAuthToken(): string {
+    return this.config.oauthToken || this.config.token || '';
+  }
+
+  /**
    * Make an authenticated request to GitHub API
    */
   async request<T>(
@@ -51,8 +53,13 @@ export class GitHubClient {
   ): Promise<T> {
     const url = endpoint.startsWith('http') ? endpoint : `${this.baseUrl}${endpoint}`;
 
+    const authToken = this.getAuthToken();
+    if (!authToken) {
+      throw new GitHubAPIError('No authentication token provided');
+    }
+
     const headers: HeadersInit = {
-      Authorization: `Bearer ${this.config.token}`,
+      Authorization: `Bearer ${authToken}`,
       Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
       ...options.headers,

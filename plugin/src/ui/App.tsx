@@ -73,9 +73,29 @@ const App: React.FC = () => {
     sendMessage({ type: 'INIT' });
   }, [sendMessage]);
 
+  const testConnection = () => {
+    console.log('💥 TEST BUTTON CLICKED - BASIC TEST');
+    sendMessage({ type: 'TEST_CONNECTION', config: { branch: 'main', tokenPaths: ['test'], owner: 'test', repo: 'test', token: 'test' } });
+  };
+
   return (
     <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
       <h2 style={{ margin: 0, fontSize: '13px', fontWeight: 600 }}>Figma Token Sync</h2>
+
+      {/* Debug Test Button */}
+      <button
+        onClick={testConnection}
+        style={{
+          padding: '8px 16px',
+          background: 'red',
+          color: 'white',
+          border: 'none',
+          borderRadius: '4px',
+          cursor: 'pointer'
+        }}
+      >
+        🔥 DEBUG TEST - CLICK ME
+      </button>
 
       <ConfigPanel
         settings={settings}
@@ -85,8 +105,12 @@ const App: React.FC = () => {
           sendMessage({ type: 'SAVE_SETTINGS', settings: newSettings });
         }}
         onTest={(config) => {
+          console.log('📱 App onTest called with config:', config);
+          console.log('📱 sendMessage function:', typeof sendMessage);
           setIsLoading(true);
+          console.log('📱 About to send TEST_CONNECTION message...');
           sendMessage({ type: 'TEST_CONNECTION', config });
+          console.log('📱 TEST_CONNECTION message sent');
         }}
         isLoading={isLoading}
       />

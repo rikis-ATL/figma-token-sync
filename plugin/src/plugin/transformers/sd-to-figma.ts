@@ -9,7 +9,8 @@ import {
   parseColor,
   parseDimension,
 } from '../figma-api/variables';
-import { StyleDictionaryTokens, StyleDictionaryToken } from '../../shared/types';
+import { StyleDictionaryTokens, StyleDictionaryToken, ProcessedTokenFile, MultiBrandStructure } from '../../shared/types';
+import { deepMerge } from '../../shared/multi-brand-utils';
 
 export interface TransformResult {
   success: boolean;
@@ -407,6 +408,279 @@ export function resolveTokenReferences(tokens: any, originalTokens?: any): any {
   }
 
   return tokens;
+}
+
+/**
+ * Ensure modes exist in collection with proper brand names
+ * This function creates modes for brands and preserves their names
+ */
+async function ensureModesInCollection(
+  collection: VariableCollection,
+  brandNames: string[]
+): Promise<void> {
+  const currentModes = collection.modes;
+  console.log(`🎨 Current modes in collection "${collection.name}":`, currentModes.map(m => `${m.name} (${m.modeId})`));
+
+  // Keep track of mode names we need
+  const requiredModeNames = new Set(['Default', ...brandNames]);
+  const existingModeNames = new Set(currentModes.map(m => m.name));
+
+  console.log(`🎯 Required modes:`, Array.from(requiredModeNames));
+  console.log(`📋 Existing modes:`, Array.from(existingModeNames));
+
+  // Create missing modes
+  for (const brandName of brandNames) {
+    if (!existingModeNames.has(brandName)) {
+      console.log(`➕ Creating mode for brand: ${brandName}`);
+      try {
+        const newMode = collection.addMode(brandName);
+        console.log(`✅ Created mode "${brandName}" with ID: ${newMode.modeId}`);
+      } catch (error) {
+        console.error(`❌ Failed to create mode "${brandName}":`, error);
+        throw new Error(`Failed to create mode "${brandName}": ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    } else {
+      console.log(`⭐ Mode "${brandName}" already exists`);
+    }
+  }
+
+  // Ensure default mode is properly named
+  const defaultMode = currentModes.find(m => m.modeId === collection.defaultModeId);
+  if (defaultMode && defaultMode.name !== 'Default') {
+    console.log(`🔄 Renaming default mode from "${defaultMode.name}" to "Default"`);
+    try {
+      defaultMode.name = 'Default';
+      console.log(`✅ Renamed default mode to "Default"`);
+    } catch (error) {
+      console.error(`❌ Failed to rename default mode:`, error);
+    }
+  }
+
+  console.log(`✅ Mode setup complete for collection "${collection.name}"`);
+}
+
+/**
+ * Transform multi-brand tokens to Figma variables with proper mode creation
+ */
+export async function transformMultiBrandTokensToFigma(
+  processedFiles: ProcessedTokenFile[],
+  brandStructure: MultiBrandStructure,
+  options: {
+    collectionName?: string;
+    targetMode?: string;
+  } = {}
+): Promise<TransformResult> {
+  const result: TransformResult = {
+    success: true,
+    collectionsCreated: 0,
+    variablesCreated: 0,
+    variablesUpdated: 0,
+    errors: [],
+    warnings: [],
+  };
+
+  try {
+    console.log(`🏢 Processing ${processedFiles.length} files for multi-brand import`);
+    console.log(`🏷️ Brands detected: ${brandStructure.brands.map(b => b.name).join(', ')}`);
+
+    if (processedFiles.length === 0) {
+      result.warnings.push('No processed token files provided');
+      return result;
+    }
+
+    // Step 1: Create base token foundation
+    console.log(`🔧 Creating base token foundation...`);
+    const baseTokens: StyleDictionaryTokens = {};
+
+    // Merge base files first
+    const baseFiles = processedFiles.filter(f => f.category === 'base');
+    for (const file of baseFiles) {
+      deepMerge(baseTokens, file.tokens);
+      console.log(`📦 Merged base file: ${file.path}`);
+    }
+
+    // Then merge global files
+    const globalFiles = processedFiles.filter(f => f.category === 'global');
+    for (const file of globalFiles) {
+      deepMerge(baseTokens, file.tokens);
+      console.log(`🌐 Merged global file: ${file.path}`);
+    }
+
+    // Step 2: Process each collection
+    const tokensByCollection = new Map<string, FlatToken[]>();
+
+    // Start with base tokens
+    const flatBaseTokens = flattenTokens(baseTokens);
+    console.log(`🔧 Found ${flatBaseTokens.length} base/global tokens`);
+
+    for (const token of flatBaseTokens) {
+      const collectionName = options.collectionName || getCollectionName(token.path);
+
+      if (!tokensByCollection.has(collectionName)) {
+        tokensByCollection.set(collectionName, []);
+      }
+
+      tokensByCollection.get(collectionName)!.push(token);
+    }
+
+    // Step 3: Create collections and set up modes
+    for (const [collectionName, baseTokensForCollection] of tokensByCollection) {
+      try {
+        console.log(`🗂️ Processing collection: ${collectionName}`);
+
+        // Get or create collection
+        const existingCollections = await figma.variables.getLocalVariableCollectionsAsync();
+        const existingCollection = existingCollections.find((c) => c.name === collectionName);
+
+        const collection = await getOrCreateCollection(collectionName);
+
+        if (!existingCollection) {
+          result.collectionsCreated++;
+        }
+
+        // Set up modes for this collection
+        const brandNames = brandStructure.brands.map(b => b.name);
+        await ensureModesInCollection(collection, brandNames);
+
+        // Track existing variables
+        const existingVariables = await Promise.all(
+          collection.variableIds.map(async (id) => {
+            return await figma.variables.getVariableByIdAsync(id);
+          })
+        );
+        const existingVariableNames = new Set(
+          existingVariables
+            .filter((v): v is Variable => v !== null)
+            .map((v) => v.name)
+        );
+
+        // Step 4: Set base values in Default mode
+        console.log(`📝 Setting base values in Default mode for ${baseTokensForCollection.length} tokens...`);
+
+        for (const token of baseTokensForCollection) {
+          try {
+            const variableName = options.collectionName
+              ? token.path
+              : getVariableName(token.path);
+
+            const figmaType = getFigmaVariableType(token.type, token.value);
+            const figmaValue = convertTokenValue(token.value, figmaType);
+
+            if (figmaValue === null) {
+              result.warnings.push(
+                `Skipped token ${token.path}: could not convert value`
+              );
+              continue;
+            }
+
+            const wasExisting = existingVariableNames.has(variableName);
+
+            // Set value in Default mode
+            await setVariableForMode(
+              collection,
+              variableName,
+              figmaType,
+              figmaValue,
+              'Default',
+              token.comment
+            );
+
+            if (wasExisting) {
+              result.variablesUpdated++;
+            } else {
+              result.variablesCreated++;
+            }
+
+            console.log(`✅ Set base value for "${variableName}" in Default mode`);
+          } catch (error) {
+            result.errors.push(
+              `Failed to process base token ${token.path}: ${error instanceof Error ? error.message : 'Unknown error'}`
+            );
+          }
+        }
+
+        // Step 5: Set brand-specific values
+        for (const brand of brandStructure.brands) {
+          console.log(`🏷️ Processing brand: ${brand.name}`);
+
+          // Create brand-specific token set
+          const brandTokens = JSON.parse(JSON.stringify(baseTokens)); // Deep clone base
+
+          // Merge brand-specific files
+          const brandFiles = processedFiles.filter(f => f.brand === brand.name);
+          for (const file of brandFiles) {
+            deepMerge(brandTokens, file.tokens);
+            console.log(`🎨 Merged brand file for ${brand.name}: ${file.path}`);
+          }
+
+          // Flatten brand tokens
+          const flatBrandTokens = flattenTokens(brandTokens);
+
+          // Find tokens that exist in this collection
+          const brandTokensForCollection = flatBrandTokens.filter(token => {
+            const collName = options.collectionName || getCollectionName(token.path);
+            return collName === collectionName;
+          });
+
+          console.log(`🎯 Found ${brandTokensForCollection.length} tokens for brand ${brand.name} in collection ${collectionName}`);
+
+          // Set brand-specific values
+          for (const token of brandTokensForCollection) {
+            try {
+              const variableName = options.collectionName
+                ? token.path
+                : getVariableName(token.path);
+
+              const figmaType = getFigmaVariableType(token.type, token.value);
+              const figmaValue = convertTokenValue(token.value, figmaType);
+
+              if (figmaValue === null) {
+                continue;
+              }
+
+              // Set value in brand mode
+              await setVariableForMode(
+                collection,
+                variableName,
+                figmaType,
+                figmaValue,
+                brand.name, // Use brand name as mode name
+                token.comment
+              );
+
+              console.log(`🎨 Set brand value for "${variableName}" in mode "${brand.name}"`);
+            } catch (error) {
+              result.warnings.push(
+                `Failed to set brand value for ${token.path} in brand ${brand.name}: ${error instanceof Error ? error.message : 'Unknown error'}`
+              );
+            }
+          }
+        }
+
+        console.log(`✅ Completed processing collection: ${collectionName}`);
+      } catch (error) {
+        result.errors.push(
+          `Failed to process collection ${collectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`
+        );
+      }
+    }
+
+    result.success = result.errors.length === 0;
+
+    console.log(`🎉 Multi-brand transformation complete!`);
+    console.log(`   Collections: ${result.collectionsCreated} created`);
+    console.log(`   Variables: ${result.variablesCreated} created, ${result.variablesUpdated} updated`);
+    console.log(`   Errors: ${result.errors.length}`);
+    console.log(`   Warnings: ${result.warnings.length}`);
+
+  } catch (error) {
+    result.success = false;
+    result.errors.push(
+      `Multi-brand transform failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+
+  return result;
 }
 
 export function parseStyleDictionary(jsonString: string): StyleDictionaryTokens {
